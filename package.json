@@ -20,6 +20,7 @@
     "test:e2e": "jest --config ./test/jest-e2e.json"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1163.0",
     "@nestjs/common": "^11.0.1",
     "@nestjs/config": "^12.1.0",
     "@nestjs/core": "^11.0.1",
@@ -29,11 +30,18 @@
     "@nestjs/typeorm": "^12.0.2",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
+    "exceljs": "^4.4.0",
+    "jszip": "^3.10.2",
+    "mammoth": "^1.13.0",
     "mongoose": "^9.12.0",
+    "officeparser": "^8.6.0",
+    "pdf-parse": "^2.4.5",
     "pg": "^8.23.1",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
     "snowflake-id": "^1.1.0",
+    "turndown": "^7.2.5",
+    "turndown-plugin-gfm": "^1.0.2",
     "typeorm": "^1.1.2"
   },
   "devDependencies": {
@@ -46,8 +54,10 @@
     "@swc/core": "^1.10.7",
     "@types/express": "^5.0.0",
     "@types/jest": "^29.5.14",
+    "@types/multer": "^2.3.0",
     "@types/node": "^22.10.7",
     "@types/supertest": "^6.0.2",
+    "@types/turndown": "^5.0.6",
     "eslint": "^9.18.0",
     "eslint-config-prettier": "^10.0.1",
     "eslint-plugin-prettier": "^5.2.2",
