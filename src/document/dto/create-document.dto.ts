@@ -1,5 +1,5 @@
 import { IsBoolean, IsEnum, IsOptional, IsString } from 'class-validator';
-import { DocumentStatus } from '../document-status';
+import { DocumentStatus } from '../entities/document.entity';
 
 /** 创建文档 */
 export class CreateDocumentDto {
@@ -26,6 +26,11 @@ export class CreateDocumentDto {
   @IsString()
   teamId?: string;
 
+  /** 作者 ID */
+  @IsOptional()
+  @IsString()
+  authorId?: string;
+
   /** 封面图 URL */
   @IsOptional()
   @IsString()
@@ -50,4 +55,9 @@ export class CreateDocumentDto {
   @IsOptional()
   @IsBoolean()
   isPublic?: boolean;
+
+  /** 创建人 ID */
+  @IsOptional()
+  @IsString()
+  createBy?: string;
 }

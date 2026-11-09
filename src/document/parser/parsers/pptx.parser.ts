@@ -1,4 +1,4 @@
-import JSZip from 'jszip';
+import * as JSZip from 'jszip';
 import { parseOffice } from 'officeparser';
 import { cleanMarkdown, toMarkdownTable } from '../utils/markdown.util';
 

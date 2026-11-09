@@ -42,20 +42,21 @@ export function getExtension(filename?: string | null): string {
   return filename.slice(filename.lastIndexOf('.') + 1).toLowerCase();
 }
 
-/**
- * Multer/busboy 常把 multipart 文件名的 UTF-8 字节按 Latin-1 解码，
- * 导致中文变成「ç³è®º…」。按 Latin-1 取回原始字节再按 UTF-8 还原。
- */
+/** 还原按 Latin-1 接收的 UTF-8 或 Windows GBK 上传文件名。 */
 export function decodeUploadFilename(filename?: string | null): string {
   if (!filename) return '';
-  try {
-    const decoded = Buffer.from(filename, 'latin1').toString('utf8');
-    // 解码失败会出现替换字符，此时保留原值
-    if (decoded.includes('\uFFFD')) return filename;
-    return decoded;
-  } catch {
-    return filename;
+  if (/[\u0100-\u{10ffff}]/u.test(filename)) return filename;
+
+  const bytes = Buffer.from(filename, 'latin1');
+  // shortcut: 未声明编码时优先 UTF-8，回退 GB18030；需消除歧义时由客户端声明编码。
+  for (const encoding of ['utf-8', 'gb18030']) {
+    try {
+      return new TextDecoder(encoding, { fatal: true }).decode(bytes);
+    } catch {
+      // 当前编码不能完整解码时尝试下一种。
+    }
   }
+  return filename;
 }
 
 /** 去掉扩展名作为文档标题；空文件名时返回「未命名文档」 */

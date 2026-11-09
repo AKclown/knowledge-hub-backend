@@ -56,7 +56,7 @@ export class DocumentService {
     const id = nextSnowflakeId();
     const wordCount = this.countWords(dto.content);
     const status = dto.status ?? DocumentStatus.Draft;
-    // 未传 summary 时，从正文截取预览作为 contentSummary
+    // 未传 summary 时，从正文截取摘要，供两库共同使用
     const contentSummary = dto.summary ?? this.buildContentSummary(dto.content);
 
     // $ 先写 Mongo，_id 由驱动自动生成 ObjectId
@@ -75,8 +75,8 @@ export class DocumentService {
       const doc = this.em.create(DocumentEntity, {
         id,
         title: dto.title,
-        contentId,  // 跟mongo里的id对应
-        summary: dto.summary,
+        contentId, // 跟mongo里的id对应
+        summary: contentSummary,
         categoryId: dto.categoryId,
         teamId: dto.teamId,
         authorId: dto.authorId,
@@ -211,6 +211,7 @@ export class DocumentService {
         );
       }
       doc.wordCount = this.countWords(dto.content);
+      doc.summary = contentSummary;
     } else if (dto.summary !== undefined) {
       // 只改摘要时，同步 Mongo 侧预览字段
       await this.contentModel.updateOne(
@@ -286,6 +287,7 @@ export class DocumentService {
     }
 
     const originalFilename = decodeUploadFilename(file.originalname);
+    console.log('originalFilename: ', originalFilename);
     const extension = getExtension(originalFilename);
 
     if (!this.fileParserService.isSupported(extension)) {
@@ -338,9 +340,11 @@ export class DocumentService {
     const created = await this.create({
       title,
       content: parsedContent,
+      summary: meta.summary,
       categoryId: meta.categoryId,
       teamId: meta.teamId,
       authorId: meta.authorId,
+      coverImage: meta.coverImage,
       tags: meta.tags,
       remark: meta.remark,
       createBy: meta.createBy,
