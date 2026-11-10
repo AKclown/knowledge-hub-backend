@@ -48,12 +48,15 @@ export class EmbeddingService {
       'EMBEDDING_BASE_URL',
       'https://dashscope.aliyuncs.com/compatible-mode/v1',
     );
+
     const model = config.get('EMBEDDING_MODEL', 'text-embedding-v3');
 
+    // 创建内嵌模型
     this.embeddings = new OpenAIEmbeddings({
       apiKey,
       model,
       dimensions: this.dimension,
+      // $ 最多嵌入十条
       batchSize,
       // Markdown chunk 保留换行，避免语义被过度压扁
       stripNewLines: false,

@@ -35,7 +35,7 @@ export class ChunkingService {
    */
   private static readonly CHARS_PER_TOKEN = 2.0;
 
-  /** 匹配块内 Markdown ATX 标题行 */
+  /** 匹配块内 Markdown ATX 标题行 . 匹配markdown的标题 */
   private static readonly HEADING_LINE = /^(#{1,6})\s+(.+)$/m;
 
   constructor(config: ConfigService) {
@@ -49,12 +49,15 @@ export class ChunkingService {
     );
 
     // 内置 markdown 分隔符未含 H1（\n# ），补上以免一级标题不切分
+    // 递归字符分块器
     this.splitter = new RecursiveCharacterTextSplitter({
       chunkSize,
       chunkOverlap,
       keepSeparator: true,
+      // 分隔符列表，告诉分块器优先尝试在哪里切分
       separators: [
         '\n# ',
+        // 从langChain里面获取到内置的markdown对应默认的分隔符列表
         ...RecursiveCharacterTextSplitter.getSeparatorsForLanguage('markdown'),
       ],
     });
@@ -78,6 +81,11 @@ export class ChunkingService {
     docStatus?: number | null;
     publishTime?: string | null;
   }): Promise<DocumentChunk[]> {
+    // 为什么需要这些元数据，除了向量相似度搜索，可能换需要：
+    // 只搜索某个分类的知识。
+    // 只搜索某个团队的知识。
+    // 只搜索已发布的文档。
+    // 根据作者或发布时间筛选。
     const { content, documentId, documentTitle } = params;
     if (!content?.trim()) {
       this.logger.warn(`文档内容为空，跳过分块：documentId=${documentId}`);
@@ -97,15 +105,19 @@ export class ChunkingService {
         currentHeading = headingInChunk;
       }
 
-      // 同章节后续块通常不含标题行：前缀补上，便于检索命中时带上下文
+      // $ 同章节后续块通常不含标题行：前缀补上，便于检索命中时带上下文
+      // 脱离原文，就不知道自己属于哪个章节。因此需要主动补充对应的标题
       let chunkContent = trimmed;
       if (currentHeading && !ChunkingService.HEADING_LINE.test(trimmed)) {
         chunkContent = `${currentHeading}\n\n${trimmed}`;
       }
 
+      // $ 元数据过滤 - 限制允许检索的文档范围。
       chunks.push({
+        // 创建 SHA-256 哈希计算器  createHash('sha256')
         chunkId: createHash('sha256')
           .update(`${documentId}:${chunks.length}`)
+          // 以十六进制字符串形式输出
           .digest('hex')
           .slice(0, 64),
         documentId,

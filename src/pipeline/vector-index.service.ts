@@ -1,5 +1,12 @@
+// $ 将文本内容、Embedding 向量以及文档元数据一起写入 Elasticsearch 的 kh_chunk 索引，供后续 RAG 检索使用。
+
 import { Client } from '@elastic/elasticsearch';
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  OnModuleInit,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DocumentChunk } from './types/pipeline.types';
 
@@ -35,12 +42,10 @@ export class VectorIndexService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const node = this.config.get(
-      'ELASTICSEARCH_NODE',
-      'http://localhost:9200',
-    );
+    const node = this.config.get('ELASTICSEARCH_NODE', 'http://localhost:9200');
     this.es = new Client({ node });
     try {
+      // 检查 ES 健康状态
       const health = await this.es.cluster.health();
       this.logger.log(
         `VectorIndex ES 已连接：${node}, status=${health.status}`,
@@ -60,13 +65,14 @@ export class VectorIndexService implements OnModuleInit, OnModuleDestroy {
   /** 删除某文档全部向量块（发布重建 / 下架时调用）。 */
   async deleteByDocId(documentId: string) {
     if (!this.es) {
-      this.logger.warn(
-        `跳过删除向量块（ES 不可用）：documentId=${documentId}`,
-      );
+      this.logger.warn(`跳过删除向量块（ES 不可用）：documentId=${documentId}`);
       return;
     }
 
     try {
+      // 表示删除操作完成后刷新索引，使删除结果能够立即被搜索请求看到。
+      // ES 是近实时搜索引擎，写入或删除的数据通常不是立即对搜索可见的。
+      // refresh: true 会增加刷新开销，所以在高吞吐量场景中，不建议每次写入和删除都强制刷新
       await this.es.deleteByQuery({
         index: CHUNK_INDEX,
         query: {
@@ -105,6 +111,7 @@ export class VectorIndexService implements OnModuleInit, OnModuleDestroy {
       this.buildDocMap(chunk),
     ]);
 
+    // 采用bulk批量写入，而不是采用index一个一个写入
     const response = await this.es.bulk({
       refresh: true,
       operations,
@@ -121,7 +128,9 @@ export class VectorIndexService implements OnModuleInit, OnModuleDestroy {
       throw new Error(`ES 批量索引部分失败：${failed.length} 条`);
     }
 
-    this.logger.log(`ES 批量索引成功：${chunks.length} chunks → ${CHUNK_INDEX}`);
+    this.logger.log(
+      `ES 批量索引成功：${chunks.length} chunks → ${CHUNK_INDEX}`,
+    );
   }
 
   /**
@@ -135,6 +144,7 @@ export class VectorIndexService implements OnModuleInit, OnModuleDestroy {
     if (exists) return;
 
     try {
+      // $ Elasticsearch 的 Index 不等于关系型数据库中的一张表，但可以先把它理解成类似数据表的逻辑存储结构。
       await this.es.indices.create({
         index: CHUNK_INDEX,
         settings: {

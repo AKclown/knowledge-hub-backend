@@ -46,6 +46,7 @@ export class PipelineOrchestrator {
       return;
     }
 
+    // pg+mongo组合成完整文档数据
     const docs = await this.loadDocumentsByIds(documentIds);
     this.logger.log(`RAG 开始索引：type=${type}, total=${docs.length}`);
 
@@ -66,9 +67,10 @@ export class PipelineOrchestrator {
       return;
     }
 
-    // 先清旧块，避免重复发布时脏数据残留
+    // 先清旧块，避免重复发布时脏数据残留 - 根据文档ID删除该文档对应所有的ES Chunk，
     await this.vectorIndexService.deleteByDocId(doc.id);
 
+    // 文本分块
     const chunks = await this.chunkingService.chunk({
       content: doc.content,
       documentId: doc.id,
@@ -82,13 +84,17 @@ export class PipelineOrchestrator {
 
     if (!chunks.length) return;
 
+    // 生成向量
     const embeddings = await this.embeddingService.embedBatch(
       chunks.map((c) => c.content),
     );
+
+    // 将向量放回对应的chunk
     for (let i = 0; i < chunks.length; i++) {
       chunks[i].embedding = embeddings[i];
     }
 
+    // 写入到ES中
     await this.vectorIndexService.indexChunks(chunks);
     this.logger.log(
       `RAG 索引完成：documentId=${doc.id}, chunks=${chunks.length}`,

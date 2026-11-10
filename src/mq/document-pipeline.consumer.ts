@@ -20,6 +20,7 @@ export class DocumentPipelineConsumer {
     private readonly rabbit: RabbitMqService,
     private readonly orchestrator: PipelineOrchestrator,
   ) {
+    // 注册重排队列
     this.rabbit.registerHandler(RAG_REINDEX_QUEUE, (msg) =>
       this.handleRag(msg),
     );
@@ -31,6 +32,7 @@ export class DocumentPipelineConsumer {
     this.logger.log(
       `[RAG] type=${body.type}, taskId=${body.taskId}, documentIds=${JSON.stringify(body.documentIds ?? [])}`,
     );
+    // $ 重新索引
     await this.orchestrator.handleRagReindex(body.type, body.documentIds);
   }
 
