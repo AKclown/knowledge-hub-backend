@@ -13,19 +13,22 @@ import { CreateDocumentDto } from './dto/create-document.dto';
 import { UpdateDocumentDto } from './dto/update-document.dto';
 import { QueryDocumentDto } from './dto/query-document.dto';
 import { UploadParseDto } from './dto/upload-parse.dto';
-import { DocumentEntity, DocumentStatus } from './entities/document.entity';
+import {
+  DocumentEntity,
+  DocumentStatus,
+} from './entities/document.entity';
 import {
   DocumentContent,
   DocumentContentDocument,
 } from './schemas/document-content.schema';
 import { RustfsService } from '../storage/rustfs.service';
+import { DocumentPipelinePublisher } from '../mq/document-pipeline.publisher';
 import { FileParserService } from './parser/file-parser.service';
 import {
   decodeUploadFilename,
   getExtension,
   titleFromFilename,
 } from './parser/utils/markdown.util';
-import { DocumentPipelinePublisher } from '../mq/document-pipeline.publisher';
 
 /**
  * 文档服务
@@ -58,27 +61,28 @@ export class DocumentService {
     const id = nextSnowflakeId();
     const wordCount = this.countWords(dto.content);
     const status = dto.status ?? DocumentStatus.Draft;
-    // 未传 summary 时，从正文截取摘要，供两库共同使用
-    const contentSummary = dto.summary ?? this.buildContentSummary(dto.content);
+    // 未传 summary 时，从正文截取预览作为 contentSummary
+    const contentSummary =
+      dto.summary ?? this.buildContentSummary(dto.content);
 
-    // $ 先写 Mongo，_id 由驱动自动生成 ObjectId
+    // 先写 Mongo，_id 由驱动自动生成 ObjectId
     const contentDoc = await this.contentModel.create({
-      documentId: id, // 文档id跟pg的id对应
+      documentId: id,
       content: dto.content,
       contentLength: dto.content.length,
       contentSummary,
       version: 1,
       deleted: false,
     });
-    // $ ObjectId 转字符串，存入 Postgres content_id
+    // ObjectId 转字符串，存入 Postgres content_id
     const contentId = String(contentDoc._id);
 
     try {
       const doc = this.em.create(DocumentEntity, {
         id,
         title: dto.title,
-        contentId, // 跟mongo里的id对应
-        summary: contentSummary,
+        contentId,
+        summary: dto.summary,
         categoryId: dto.categoryId,
         teamId: dto.teamId,
         authorId: dto.authorId,
@@ -213,7 +217,6 @@ export class DocumentService {
         );
       }
       doc.wordCount = this.countWords(dto.content);
-      doc.summary = contentSummary;
     } else if (dto.summary !== undefined) {
       // 只改摘要时，同步 Mongo 侧预览字段
       await this.contentModel.updateOne(
@@ -259,8 +262,63 @@ export class DocumentService {
   }
 
   /**
+   * 直接发布文档（不做审核）
+   *
+   * 流程：
+   * 1. 校验文档存在且状态为草稿 / 已发布
+   * 2. 写库：status=Published，刷新 publishTime
+   * 3. 读 Mongo 正文，投递 RabbitMQ（RAG 向量化 + Search 全文索引）
+   * 4. 投递失败只打日志，不回滚「已发布」状态
+   *
+   * 异步消费侧见 DocumentPipelineConsumer → PipelineOrchestrator：
+   * - RAG：分块 → 嵌入 → ES(kh_chunk)
+   * - Search：整篇快照 → ES(kh_document)
+   */
+  async publish(id: string) {
+    this.logger.log(`发布文档：documentId=${id}`);
+
+    const doc = await this.em.findOne(DocumentEntity, {
+      where: { id, deleted: false },
+    });
+    if (!doc) {
+      throw new NotFoundException(`Document ${id} not found`);
+    }
+
+    // 仅草稿 / 已发布可发布（已发布再次发布会重建索引）
+    if (
+      doc.status !== DocumentStatus.Draft &&
+      doc.status !== DocumentStatus.Published
+    ) {
+      throw new BadRequestException('当前文档状态不允许发布');
+    }
+
+    doc.status = DocumentStatus.Published;
+    doc.publishTime = new Date();
+    const saved = await this.em.save(doc);
+
+    const contentDoc = await this.contentModel
+      .findOne({ _id: doc.contentId, deleted: false })
+      .lean();
+    const content = contentDoc?.content ?? null;
+
+    // MQ 失败不影响发布成功
+    try {
+      await this.pipelinePublisher.afterPublish(saved, content);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        `发布后管线投递失败（不影响发布）：documentId=${id}, error=${message}`,
+      );
+    }
+
+    this.logger.log(`文档发布成功：documentId=${id}`);
+    return { ...saved, content: content ?? '' };
+  }
+
+  /**
    * 软删除文档
-   * Postgres、Mongo 两侧都将 deleted 置为 true（不物理删正文）
+   * Postgres、Mongo 两侧都将 deleted 置为 true（不物理删正文），
+   * 并异步清理 ES 搜索索引与向量块。
    */
   async remove(id: string) {
     const doc = await this.em.findOne(DocumentEntity, {
@@ -276,6 +334,16 @@ export class DocumentService {
       { _id: doc.contentId },
       { $set: { deleted: true } },
     );
+
+    try {
+      await this.pipelinePublisher.afterUnpublish(id);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        `删除后索引清理投递失败：documentId=${id}, error=${message}`,
+      );
+    }
+
     return { id, deleted: true };
   }
 
@@ -289,7 +357,6 @@ export class DocumentService {
     }
 
     const originalFilename = decodeUploadFilename(file.originalname);
-    console.log('originalFilename: ', originalFilename);
     const extension = getExtension(originalFilename);
 
     if (!this.fileParserService.isSupported(extension)) {
@@ -312,16 +379,13 @@ export class DocumentService {
     } catch (error) {
       if (error instanceof BadRequestException) throw error;
       const message = error instanceof Error ? error.message : String(error);
-      this.logger.error(
-        `文件解析失败：name=${originalFilename}, error=${message}`,
-      );
+      this.logger.error(`文件解析失败：name=${originalFilename}, error=${message}`);
       throw new BadRequestException(`文件解析失败: ${message}`);
     }
 
     let fileUrl: string | null = null;
     if (this.rustfs.isEnabled()) {
       try {
-        // 上传到rustfs，返回对应的文件url
         fileUrl = await this.rustfs.uploadBytes(file.buffer, {
           fileName: originalFilename,
           contentType: file.mimetype || 'application/octet-stream',
@@ -336,17 +400,14 @@ export class DocumentService {
       this.logger.warn('RustFS 未启用，跳过原文件上传');
     }
 
-    // 文件名称作为tittle
     const title = titleFromFilename(originalFilename);
 
     const created = await this.create({
       title,
       content: parsedContent,
-      summary: meta.summary,
       categoryId: meta.categoryId,
       teamId: meta.teamId,
       authorId: meta.authorId,
-      coverImage: meta.coverImage,
       tags: meta.tags,
       remark: meta.remark,
       createBy: meta.createBy,
@@ -404,58 +465,5 @@ export class DocumentService {
       .filter(Boolean).length; // 去掉空串
 
     return cjk + latin;
-  }
-
-  /**
-   * 直接发布文档（不做审核）
-   *
-   * 流程：
-   * 1. 校验文档存在且状态为草稿 / 已发布
-   * 2. 写库：status=Published，刷新 publishTime
-   * 3. 读 Mongo 正文，投递 RabbitMQ（RAG 向量化）
-   * 4. 投递失败只打日志，不回滚「已发布」状态
-   *
-   * 异步消费侧见 DocumentPipelineConsumer → PipelineOrchestrator：
-   * 分块(ChunkingService) → 嵌入 → ES(kh_chunk)
-   */
-  async publish(id: string) {
-    this.logger.log(`发布文档：documentId=${id}`);
-
-    const doc = await this.em.findOne(DocumentEntity, {
-      where: { id, deleted: false },
-    });
-    if (!doc) {
-      throw new NotFoundException(`Document ${id} not found`);
-    }
-
-    // 仅草稿 / 已发布可发布（已发布再次发布会重建索引）
-    if (
-      doc.status !== DocumentStatus.Draft &&
-      doc.status !== DocumentStatus.Published
-    ) {
-      throw new BadRequestException('当前文档状态不允许发布');
-    }
-
-    doc.status = DocumentStatus.Published;
-    doc.publishTime = new Date();
-    const saved = await this.em.save(doc);
-
-    const contentDoc = await this.contentModel
-      .findOne({ _id: doc.contentId, deleted: false })
-      .lean();
-    const content = contentDoc?.content ?? null;
-
-    // MQ 失败不影响发布成功
-    try {
-      await this.pipelinePublisher.afterPublish(saved);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logger.warn(
-        `发布后管线投递失败（不影响发布）：documentId=${id}, error=${message}`,
-      );
-    }
-
-    this.logger.log(`文档发布成功：documentId=${id}`);
-    return { ...saved, content: content ?? '' };
   }
 }

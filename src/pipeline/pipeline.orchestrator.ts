@@ -10,6 +10,7 @@ import {
 } from '../document/schemas/document-content.schema';
 import { ChunkingService } from './chunking.service';
 import { EmbeddingService } from './embedding.service';
+import { SearchIndexService } from './search-index.service';
 import { VectorIndexService } from './vector-index.service';
 import { PipelineDocument } from './types/pipeline.types';
 
@@ -17,6 +18,7 @@ import { PipelineDocument } from './types/pipeline.types';
  * 发布后知识管线编排器
  *
  * <p>RAG：分块 → Embedding → ES kh_chunk</p>
+ * <p>Search：整篇快照 → ES kh_document</p>
  *
  * <p>由 {@link DocumentPipelineConsumer} 在消费到 MQ 消息后调用；</p>
  * <p>本类负责「加载文档 → 调具体服务」，不直接碰 RabbitMQ。</p>
@@ -33,20 +35,27 @@ export class PipelineOrchestrator {
     private readonly chunkingService: ChunkingService,
     private readonly embeddingService: EmbeddingService,
     private readonly vectorIndexService: VectorIndexService,
+    private readonly searchIndexService: SearchIndexService,
   ) {}
 
   /**
-   * 处理 RAG 重建消息。
+   * 处理 RAG 重建 / 删除消息。
    *
    * 重建流水线（单文档）：清旧块 → Chunking → Embedding → 写入 ES kh_chunk
    */
   async handleRagReindex(type: string, documentIds?: string[]) {
+    if (type === 'DELETE_BY_DOC_IDS' && documentIds?.length) {
+      for (const id of documentIds) {
+        await this.vectorIndexService.deleteByDocId(id);
+      }
+      return;
+    }
+
     if (type !== 'BY_DOC_IDS' || !documentIds?.length) {
       this.logger.warn(`忽略未支持的 RAG 消息：type=${type}`);
       return;
     }
 
-    // pg+mongo组合成完整文档数据
     const docs = await this.loadDocumentsByIds(documentIds);
     this.logger.log(`RAG 开始索引：type=${type}, total=${docs.length}`);
 
@@ -60,6 +69,35 @@ export class PipelineOrchestrator {
     }
   }
 
+  /**
+   * 处理 Search 索引消息。
+   * INDEX：消息内已带文档快照，直接写入 ES kh_document。
+   * DELETE：按 documentId 删除。
+   */
+  async handleSearchIndex(
+    type: string,
+    documentId: string,
+    document?: Record<string, unknown>,
+  ) {
+    if (type === 'DELETE') {
+      await this.searchIndexService.deleteDocument(documentId);
+      return;
+    }
+
+    if (type === 'INDEX') {
+      if (!document) {
+        this.logger.warn(
+          `Search INDEX 消息缺少 document 快照：documentId=${documentId}`,
+        );
+        return;
+      }
+      await this.searchIndexService.indexDocument(document);
+      return;
+    }
+
+    this.logger.warn(`忽略未支持的 Search 消息：type=${type}`);
+  }
+
   /** 单篇：分块 → 批量嵌入 → 落库 */
   private async reindexOne(doc: PipelineDocument) {
     if (!doc.content?.trim()) {
@@ -67,10 +105,9 @@ export class PipelineOrchestrator {
       return;
     }
 
-    // 先清旧块，避免重复发布时脏数据残留 - 根据文档ID删除该文档对应所有的ES Chunk，
+    // 先清旧块，避免重复发布时脏数据残留
     await this.vectorIndexService.deleteByDocId(doc.id);
 
-    // 文本分块
     const chunks = await this.chunkingService.chunk({
       content: doc.content,
       documentId: doc.id,
@@ -84,17 +121,13 @@ export class PipelineOrchestrator {
 
     if (!chunks.length) return;
 
-    // 生成向量
     const embeddings = await this.embeddingService.embedBatch(
       chunks.map((c) => c.content),
     );
-
-    // 将向量放回对应的chunk
     for (let i = 0; i < chunks.length; i++) {
       chunks[i].embedding = embeddings[i];
     }
 
-    // 写入到ES中
     await this.vectorIndexService.indexChunks(chunks);
     this.logger.log(
       `RAG 索引完成：documentId=${doc.id}, chunks=${chunks.length}`,

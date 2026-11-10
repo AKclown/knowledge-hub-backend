@@ -1,4 +1,3 @@
-// $ 统一管理 RabbitMQ 的连接、消息发送、消费者绑定和消息确认，为文档发布后的 RAG 索引任务提供消息通道
 import {
   Injectable,
   Logger,
@@ -6,17 +5,20 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-// $ 基于 amqplib 封装，负责连接自动恢复、Channel 自动重建、断线重连等工作。 (连接管理、断线重连、Channel 恢复)
 import amqp, {
   AmqpConnectionManager,
   ChannelWrapper,
 } from 'amqp-connection-manager';
-// $ 负责真正与 RabbitMQ 通信，提供连接、创建 Channel、发送消息、消费消息等能力
 import { ConfirmChannel, ConsumeMessage } from 'amqplib';
 import {
   RAG_REINDEX_EXCHANGE,
   RAG_REINDEX_QUEUE,
   RAG_RK_BY_IDS,
+  RAG_RK_DELETE,
+  SEARCH_INDEX_EXCHANGE,
+  SEARCH_INDEX_QUEUE,
+  SEARCH_RK_DELETE,
+  SEARCH_RK_INDEX,
 } from './mq.constants';
 
 export type MessageHandler = (msg: ConsumeMessage) => Promise<void> | void;
@@ -64,19 +66,19 @@ export class RabbitMqService implements OnModuleInit, OnModuleDestroy {
       this.logger.log(`RabbitMQ 已连接：${this.redactAmqpUrl(connectedUrl)}`);
     });
     this.connection.on('disconnect', (err) =>
-      this.logger.warn(`RabbitMQ 断开：${this.errorMessage(err?.err ?? err)}`),
+      this.logger.warn(
+        `RabbitMQ 断开：${this.errorMessage(err?.err ?? err)}`,
+      ),
     );
     this.connection.on('connectFailed', (err) =>
       this.logger.error(
         `RabbitMQ 连接失败：${this.errorMessage(err?.err ?? err)}（url=${safeUrl}）`,
       ),
     );
+
     this.channel = this.connection.createChannel({
-      // `json: true` 表示发送对象时由包装库自动编码成 JSON。
       json: true,
-      // 当底层连接恢复、Channel 被重新创建时，setup 也会重新执行。因此可以重新完成：Exchange、Queue、Binding、Consumer
       setup: async (ch: ConfirmChannel) => {
-        // $ 创建Channel，在setup中先声明 交换机、队列和绑定关系、再绑定消费者
         this.logger.log('RabbitMQ channel setup：声明拓扑并绑定消费者');
         await this.assertTopology(ch);
         await this.bindConsumers(ch);
@@ -84,7 +86,6 @@ export class RabbitMqService implements OnModuleInit, OnModuleDestroy {
     });
 
     try {
-      // 等待 Channel 就绪；初始化失败时关闭连接、清空引用，并重新抛出错误
       await Promise.race([
         this.channel.waitForConnect(),
         new Promise<never>((_, reject) => {
@@ -164,16 +165,25 @@ export class RabbitMqService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async assertTopology(ch: ConfirmChannel) {
-    // 交换机、队列与路由
-
-    // 交换机类型配置为 topic, 路由参数模糊匹配
     await ch.assertExchange(RAG_REINDEX_EXCHANGE, 'topic', { durable: true });
-    // 表示队列不存在就创建，已存在且参数一致则复用； `durable: true` 用于让队列在 Broker 重启后保留
     await ch.assertQueue(RAG_REINDEX_QUEUE, { durable: true });
-    // 绑定对应的队列
     await ch.bindQueue(RAG_REINDEX_QUEUE, RAG_REINDEX_EXCHANGE, RAG_RK_BY_IDS);
+    await ch.bindQueue(RAG_REINDEX_QUEUE, RAG_REINDEX_EXCHANGE, RAG_RK_DELETE);
 
-    this.logger.log('RabbitMQ 拓扑已声明（RAG）');
+    await ch.assertExchange(SEARCH_INDEX_EXCHANGE, 'topic', { durable: true });
+    await ch.assertQueue(SEARCH_INDEX_QUEUE, { durable: true });
+    await ch.bindQueue(
+      SEARCH_INDEX_QUEUE,
+      SEARCH_INDEX_EXCHANGE,
+      SEARCH_RK_INDEX,
+    );
+    await ch.bindQueue(
+      SEARCH_INDEX_QUEUE,
+      SEARCH_INDEX_EXCHANGE,
+      SEARCH_RK_DELETE,
+    );
+
+    this.logger.log('RabbitMQ 拓扑已声明（RAG + Search）');
   }
 
   private async bindConsumers(ch: ConfirmChannel) {
@@ -182,13 +192,11 @@ export class RabbitMqService implements OnModuleInit, OnModuleDestroy {
         if (!msg) return;
         try {
           await handler(msg);
-          // 告诉mq这个消息已经被处理了，可以删除了
           ch.ack(msg);
         } catch (error) {
           const message =
             error instanceof Error ? error.message : String(error);
           this.logger.error(`消费失败 queue=${queue}: ${message}`);
-          // 告诉mq消息处理失败，按照指定策略处理
           ch.nack(msg, false, false);
         }
       });
