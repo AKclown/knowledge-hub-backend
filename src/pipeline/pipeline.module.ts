@@ -22,10 +22,10 @@ import { VectorIndexService } from './vector-index.service';
     ChunkingService,
     EmbeddingService,
     VectorIndexService,
-    SearchIndexService,
     ExtractionService,
     GraphBuildService,
     PipelineOrchestrator,
+    SearchIndexService,
   ],
   exports: [
     PipelineOrchestrator,
