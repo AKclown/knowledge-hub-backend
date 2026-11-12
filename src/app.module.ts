@@ -5,7 +5,9 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { DocumentModule } from './document/document.module';
+import { StorageModule } from './storage/storage.module';
 import { DocumentEntity } from './document/entities/document.entity';
+import { DocumentReviewEntity } from './document/entities/document-review.entity';
 import { MqModule } from './mq/mq.module';
 
 @Module({
@@ -23,7 +25,7 @@ import { MqModule } from './mq/mq.module';
         username: config.getOrThrow<string>('POSTGRES_USER'),
         password: config.getOrThrow<string>('POSTGRES_PASSWORD'),
         database: config.getOrThrow<string>('POSTGRES_DB'),
-        entities: [DocumentEntity],
+        entities: [DocumentEntity, DocumentReviewEntity],
         synchronize: false,
       }),
     }),
@@ -35,6 +37,7 @@ import { MqModule } from './mq/mq.module';
     }),
     DocumentModule,
     MqModule,
+    StorageModule,
   ],
   controllers: [AppController],
   providers: [AppService],
