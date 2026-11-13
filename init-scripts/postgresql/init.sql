@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS kh_role (
 );
 
 CREATE TABLE IF NOT EXISTS kh_user_role (
-    id BIGINT PRIMARY KEY,                          -- 关联 ID（雪花）
+    id BIGINT PRIMARY KEY,                          -- 关联 ID（雪花） 
     user_id BIGINT NOT NULL REFERENCES kh_user(id), -- 用户 ID
     role_id BIGINT NOT NULL REFERENCES kh_role(id), -- 角色 ID
     created_at TIMESTAMP NOT NULL DEFAULT NOW(),    -- 分配时间
