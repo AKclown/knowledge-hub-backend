@@ -15,6 +15,9 @@ import { UserRoleEntity } from './user/entities/user-role.entity';
 import { PermissionEntity } from './user/entities/permission.entity';
 import { RolePermissionEntity } from './user/entities/role-permission.entity';
 import { UserPermissionEntity } from './user/entities/user-permission.entity';
+import { TeamEntity } from './team/entities/team.entity';
+import { TeamMemberEntity } from './team/entities/team-member.entity';
+import { TeamModule } from './team/team.module';
 import { RedisModule } from './redis/redis.module';
 import { MqModule } from './mq/mq.module';
 import { PipelineModule } from './pipeline/pipeline.module';
@@ -62,6 +65,8 @@ import { StorageModule } from './storage/storage.module';
           PermissionEntity,
           RolePermissionEntity,
           UserPermissionEntity,
+          TeamEntity,
+          TeamMemberEntity,
         ],
         synchronize: false,
       }),
@@ -77,6 +82,7 @@ import { StorageModule } from './storage/storage.module';
     }),
     DocumentModule,
     AuthModule,
+    TeamModule,
   ],
   controllers: [AppController],
   providers: [AppService],
