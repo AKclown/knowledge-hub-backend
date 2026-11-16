@@ -23,6 +23,7 @@ import { MqModule } from './mq/mq.module';
 import { PipelineModule } from './pipeline/pipeline.module';
 import { StorageModule } from './storage/storage.module';
 import { SearchModule } from './search/search.module';
+import { AiModule } from './ai/ai.module';
 
 @Module({
   imports: [
@@ -85,6 +86,7 @@ import { SearchModule } from './search/search.module';
     AuthModule,
     TeamModule,
     SearchModule,
+    AiModule,
   ],
   controllers: [AppController],
   providers: [AppService],
