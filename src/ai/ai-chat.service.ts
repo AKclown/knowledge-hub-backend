@@ -8,20 +8,14 @@ import { ChatOpenAI } from '@langchain/openai';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { HybridRetrievalService } from './hybrid-retrieval.service';
 import { ChunkHit } from '../pipeline/types/pipeline.types';
+import { ChatSessionService } from './chat-session.service';
+import type { AuthUser } from '../auth/auth-user.interface';
+import type { ChatSource } from './chat.types';
+
+export type { ChatSource } from './chat.types';
 
 const EXCERPT_LEN = 200;
 const CITATION_RE = /\[(\d+)\]/g;
-
-/** 返给前端的溯源条目（摘录，不含整块正文） */
-export interface ChatSource {
-  /** 资料编号，与回答中的 [n] 对应 */
-  index: number;
-  documentId: string;
-  documentTitle: string;
-  heading: string | null;
-  excerpt: string;
-  score: number;
-}
 
 /**
  * RAG 对话：kh_chunk 混合检索（关键词 + 向量 + RRF + rerank）→ LLM 作答。
@@ -34,6 +28,7 @@ export class AiChatService {
   constructor(
     config: ConfigService,
     private readonly retrieval: HybridRetrievalService,
+    private readonly sessions: ChatSessionService,
   ) {
     const apiKey =
       config.get<string>('OPENAI_API_KEY') ||
@@ -64,18 +59,32 @@ export class AiChatService {
     });
   }
 
-  async chat(question: string, topK = 5) {
+  async chat(question: string, topK = 5, user?: AuthUser, sessionId?: string) {
     const trimmed = question.trim();
     if (!trimmed) {
-      return { answer: '请输入问题。', sources: [] as ChatSource[] };
+      return {
+        sessionId: sessionId ?? null,
+        answer: '请输入问题。',
+        sources: [] as ChatSource[],
+      };
     }
 
     const hits = await this.retrieval.retrieve(trimmed, topK);
     if (!hits.length) {
-      return {
+      const empty = {
         answer: '知识库里没有相关内容。',
         sources: [] as ChatSource[],
       };
+      const session = user
+        ? await this.sessions.appendTurn(
+            user.userId,
+            sessionId,
+            trimmed,
+            empty.answer,
+            empty.sources,
+          )
+        : null;
+      return { sessionId: session?.id ?? sessionId ?? null, ...empty };
     }
 
     if (!this.llm) {
@@ -93,9 +102,7 @@ export class AiChatService {
           '编号必须与资料列表一致，不要标注未使用的编号，不要编造文档标题或链接。' +
           '回答简洁，必要时列出条目。',
       ),
-      new HumanMessage(
-        `检索到的资料：\n${context}\n\n用户问题：${trimmed}`,
-      ),
+      new HumanMessage(`检索到的资料：\n${context}\n\n用户问题：${trimmed}`),
     ]);
 
     const answer =
@@ -107,7 +114,18 @@ export class AiChatService {
     this.logger.log(
       `RAG 对话完成：hits=${hits.length}, cited=${sources.length}, answerLength=${answer.length}`,
     );
-    return { answer, sources };
+
+    const session = user
+      ? await this.sessions.appendTurn(
+          user.userId,
+          sessionId,
+          trimmed,
+          answer,
+          sources,
+        )
+      : null;
+
+    return { sessionId: session?.id ?? sessionId ?? null, answer, sources };
   }
 
   /** 从回答中抽出 [n]，只返回实际引用的资料；未标注时回退为全部召回（摘录）。 */
@@ -119,7 +137,9 @@ export class AiChatService {
     }
 
     const indexes =
-      cited.size > 0 ? [...cited].sort((a, b) => a - b) : hits.map((_, i) => i + 1);
+      cited.size > 0
+        ? [...cited].sort((a, b) => a - b)
+        : hits.map((_, i) => i + 1);
 
     return indexes.map((index) => this.toSource(index, hits[index - 1]));
   }
