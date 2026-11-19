@@ -8,7 +8,11 @@ import {
 import { toUIMessageStream } from '@ai-sdk/langchain';
 import { ChatOpenAI } from '@langchain/openai';
 import { HumanMessage } from '@langchain/core/messages';
-import { createAgent, modelCallLimitMiddleware, tool } from 'langchain';
+import {
+  createAgent,
+  modelCallLimitMiddleware,
+  tool,
+} from 'langchain';
 import { z } from 'zod';
 import type { Response } from 'express';
 import { HybridRetrievalService } from './hybrid-retrieval.service';
@@ -27,7 +31,6 @@ const SYSTEM =
   '依据资料的陈述句末标 [n]，与资料编号一致。' +
   '联网结果用标题+链接说明，不要编造。资料不够就明确说不知道。';
 
-// 自定义 UIMessage 类型
 type KhUIMessage = UIMessage<
   unknown,
   {
@@ -143,7 +146,6 @@ export class AiStreamService {
           return;
         }
 
-        // 创建或更新会话
         const session = dto.sessionId
           ? await this.sessions.touchTitle(user.userId, dto.sessionId, question)
           : await this.sessions.create(user.userId, {
@@ -162,7 +164,7 @@ export class AiStreamService {
 
         let hits: ChunkHit[] = [];
         try {
-          hits = await this.retrieval.retrieve(question, topK);
+          hits = await this.retrieval.retrieve(question, topK, user);
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
           this.logger.warn(`RAG 检索失败：${detail}`);
@@ -308,10 +310,7 @@ function attachDashScopeReasoning(
   }
   const obj = value as Record<string, unknown>;
   const kwargs = obj.additional_kwargs as Record<string, unknown> | undefined;
-  if (
-    typeof kwargs?.reasoning_content === 'string' &&
-    kwargs.reasoning_content
-  ) {
+  if (typeof kwargs?.reasoning_content === 'string' && kwargs.reasoning_content) {
     kwargs.reasoning = {
       summary: [{ type: 'summary_text', text: kwargs.reasoning_content }],
     };
@@ -322,7 +321,9 @@ function attachDashScopeReasoning(
   attachDashScopeReasoning(obj.messages, seen);
 }
 
-function lastUserText(messages: ChatStreamDto['messages'] | undefined): string {
+function lastUserText(
+  messages: ChatStreamDto['messages'] | undefined,
+): string {
   if (!messages?.length) return '';
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const msg = messages[i];

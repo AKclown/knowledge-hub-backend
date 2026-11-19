@@ -80,8 +80,8 @@ export class DocumentController {
   /** 分页查询文档列表（仅元数据） */
   @Get()
   @RequirePermission(PermissionCode.documentList)
-  findAll(@Query() query: QueryDocumentDto) {
-    return this.documentService.findAll(query);
+  findAll(@Query() query: QueryDocumentDto, @CurrentUser() user: AuthUser) {
+    return this.documentService.findAll(query, user);
   }
 
   /** 发布文档（需审核时进入待审；免审则直接发布并投递 MQ） */
@@ -114,20 +114,14 @@ export class DocumentController {
 
   /** 当前待审记录（review_result IS NULL） */
   @Get(':id/reviews/current')
-  @RequirePermission(
-    PermissionCode.documentList,
-    PermissionCode.documentReview,
-  )
+  @RequirePermission(PermissionCode.documentList, PermissionCode.documentReview)
   getCurrentReview(@Param('id') id: string) {
     return this.reviewService.getCurrentReview(id);
   }
 
   /** 该文档全部审核历史，按 created_at 倒序 */
   @Get(':id/reviews/history')
-  @RequirePermission(
-    PermissionCode.documentList,
-    PermissionCode.documentReview,
-  )
+  @RequirePermission(PermissionCode.documentList, PermissionCode.documentReview)
   getReviewHistory(@Param('id') id: string) {
     return this.reviewService.getReviewHistory(id);
   }
@@ -169,8 +163,8 @@ export class DocumentController {
   /** 查询文档详情（含正文） */
   @Get(':id')
   @RequirePermission(PermissionCode.documentList)
-  findOne(@Param('id') id: string) {
-    return this.documentService.findOne(id);
+  findOne(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.documentService.findOne(id, true, user);
   }
 
   /** 更新文档 */

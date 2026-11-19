@@ -59,7 +59,12 @@ export class AiChatService {
     });
   }
 
-  async chat(question: string, topK = 5, user?: AuthUser, sessionId?: string) {
+  async chat(
+    question: string,
+    topK = 5,
+    user?: AuthUser,
+    sessionId?: string,
+  ) {
     const trimmed = question.trim();
     if (!trimmed) {
       return {
@@ -69,7 +74,7 @@ export class AiChatService {
       };
     }
 
-    const hits = await this.retrieval.retrieve(trimmed, topK);
+    const hits = await this.retrieval.retrieve(trimmed, topK, user);
     if (!hits.length) {
       const empty = {
         answer: '知识库里没有相关内容。',
@@ -102,7 +107,9 @@ export class AiChatService {
           '编号必须与资料列表一致，不要标注未使用的编号，不要编造文档标题或链接。' +
           '回答简洁，必要时列出条目。',
       ),
-      new HumanMessage(`检索到的资料：\n${context}\n\n用户问题：${trimmed}`),
+      new HumanMessage(
+        `检索到的资料：\n${context}\n\n用户问题：${trimmed}`,
+      ),
     ]);
 
     const answer =
@@ -137,9 +144,7 @@ export class AiChatService {
     }
 
     const indexes =
-      cited.size > 0
-        ? [...cited].sort((a, b) => a - b)
-        : hits.map((_, i) => i + 1);
+      cited.size > 0 ? [...cited].sort((a, b) => a - b) : hits.map((_, i) => i + 1);
 
     return indexes.map((index) => this.toSource(index, hits[index - 1]));
   }

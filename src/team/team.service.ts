@@ -9,11 +9,7 @@ import { nextSnowflakeId } from '../common/snowflake-id';
 import { TeamEntity } from './entities/team.entity';
 import { TeamMemberEntity } from './entities/team-member.entity';
 import { UserEntity } from '../user/entities/user.entity';
-import {
-  CreateTeamDto,
-  QueryTeamDto,
-  UpdateTeamDto,
-} from './dto/team.dto';
+import { CreateTeamDto, QueryTeamDto, UpdateTeamDto } from './dto/team.dto';
 
 @Injectable()
 export class TeamService {
@@ -25,6 +21,48 @@ export class TeamService {
     @InjectRepository(UserEntity)
     private readonly userRepo: Repository<UserEntity>,
   ) {}
+
+  /**
+   * 当前用户可访问的团队 ID（供 AuthUser.teamIds / 文档可见性使用）。
+   * 来源：成员表身份 ∪ 担任负责人；已软删团队不计入。
+   */
+  async listAccessibleTeamIds(userId: string): Promise<string[]> {
+    // 成员表；负责人可能不在成员表，需单独查 kh_team.leader_id
+    const [memberRows, led] = await Promise.all([
+      this.memberRepo
+        .createQueryBuilder('m')
+        .select('m.team_id', 'teamId')
+        .where('m.user_id = :userId', { userId })
+        .getRawMany<{ teamId: string | number }>(),
+      this.teamRepo.find({
+        where: { leaderId: userId, deleted: false },
+        select: { id: true },
+      }),
+    ]);
+    // bigint 可能是 string | number，统一成字符串再去重，避免同一团队出现两次
+    const ids = [
+      ...new Set([
+        ...memberRows.map((row) => String(row.teamId)),
+        ...led.map((row) => String(row.id)),
+      ]),
+    ];
+    if (!ids.length) return [];
+    // 成员记录可能仍指向已软删团队，再按 kh_team.deleted = false 过滤
+    const teams = await this.teamRepo.find({
+      where: { id: In(ids), deleted: false },
+      select: { id: true, teamName: true },
+    });
+    return teams.map((row) => String(row.id));
+  }
+
+  async listMine(userId: string): Promise<TeamEntity[]> {
+    const ids = await this.listAccessibleTeamIds(userId);
+    if (!ids.length) return [];
+    return this.teamRepo.find({
+      where: { id: In(ids), deleted: false },
+      order: { sort: 'ASC', createdAt: 'ASC' },
+    });
+  }
 
   async create(dto: CreateTeamDto) {
     const team = this.teamRepo.create({
@@ -79,14 +117,11 @@ export class TeamService {
   async page(query: QueryTeamDto) {
     const page = query.page ?? 1;
     const pageSize = query.pageSize ?? 20;
-    const qb = this.teamRepo
-      .createQueryBuilder('t')
-      .where('t.deleted = false');
+    const qb = this.teamRepo.createQueryBuilder('t').where('t.deleted = false');
     if (query.keyword?.trim()) {
-      qb.andWhere(
-        '(t.team_name ILIKE :kw OR t.team_code ILIKE :kw)',
-        { kw: `%${query.keyword.trim()}%` },
-      );
+      qb.andWhere('(t.team_name ILIKE :kw OR t.team_code ILIKE :kw)', {
+        kw: `%${query.keyword.trim()}%`,
+      });
     }
     if (query.status !== undefined) {
       qb.andWhere('t.status = :status', { status: query.status });
@@ -111,9 +146,7 @@ export class TeamService {
           ...t,
           children: rootOnly ? [] : build(t.id),
         }));
-    const rootNodes = teams.filter(
-      (t) => !t.parentId || t.parentId === '0',
-    );
+    const rootNodes = teams.filter((t) => !t.parentId || t.parentId === '0');
     return rootOnly
       ? rootNodes
       : rootNodes.map((t) => ({
@@ -131,7 +164,9 @@ export class TeamService {
       throw new NotFoundException('部分用户不存在');
     }
     for (const userId of userIds) {
-      const exists = await this.memberRepo.findOne({ where: { teamId, userId } });
+      const exists = await this.memberRepo.findOne({
+        where: { teamId, userId },
+      });
       if (exists) continue;
       await this.memberRepo.save(
         this.memberRepo.create({

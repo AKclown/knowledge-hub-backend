@@ -6,6 +6,11 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import {
+  ES_DOC_VISIBILITY_FIELDS,
+  esVisibilityFilter,
+  type DocumentAccessScope,
+} from '../document/document-access';
 
 /** ES 文档级全文检索索引名 */
 const ES_INDEX = 'kh_document';
@@ -44,6 +49,7 @@ export class SearchIndexService implements OnModuleInit, OnModuleDestroy {
         `SearchIndex ES 已连接：${node}, status=${health.status}`,
       );
       await this.ensureEsIndex();
+      await this.ensureVisibilityMapping();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.warn(`Elasticsearch 不可用，搜索索引将跳过写入：${message}`);
@@ -78,6 +84,37 @@ export class SearchIndexService implements OnModuleInit, OnModuleDestroy {
     });
 
     this.logger.log(`搜索索引已写入 ES：documentId=${id}`);
+  }
+
+  /** 已发布文档只改公开/团队时，补写可见性字段，不必整篇重索引 */
+  async updateVisibility(
+    documentId: string,
+    vis: { isPublic: boolean; teamId: string | null; authorId: string | null },
+  ) {
+    if (!this.es) {
+      this.logger.warn(
+        `跳过搜索可见性更新（ES 不可用）：documentId=${documentId}`,
+      );
+      return;
+    }
+    try {
+      await this.es.update({
+        index: ES_INDEX,
+        id: documentId,
+        doc: {
+          isPublic: vis.isPublic,
+          teamId: vis.teamId,
+          authorId: vis.authorId,
+        },
+        refresh: true,
+      });
+      this.logger.log(`搜索索引可见性已更新：documentId=${documentId}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        `搜索索引可见性更新失败：documentId=${documentId}, ${message}`,
+      );
+    }
   }
 
   /** 下架 / 删除时从 ES 移除 */
@@ -115,6 +152,7 @@ export class SearchIndexService implements OnModuleInit, OnModuleDestroy {
     pageSize?: number;
     categoryId?: string;
     authorId?: string;
+    scope?: DocumentAccessScope;
   }) {
     const page = params.page ?? 1;
     const pageSize = Math.min(params.pageSize ?? 10, 50);
@@ -125,8 +163,11 @@ export class SearchIndexService implements OnModuleInit, OnModuleDestroy {
       return { items: [], total: 0, page, pageSize };
     }
 
-    // $ 构建过滤条件 filters
     const filters: Record<string, unknown>[] = [];
+    const vis = params.scope
+      ? esVisibilityFilter(params.scope, ES_DOC_VISIBILITY_FIELDS)
+      : null;
+    if (vis) filters.push(vis);
     if (params.categoryId) {
       filters.push({ term: { categoryId: params.categoryId } });
     }
@@ -139,17 +180,12 @@ export class SearchIndexService implements OnModuleInit, OnModuleDestroy {
     const query =
       filters.length > 0
         ? {
-            // bool：组合多个查询条件
             bool: {
-              // and的关系，都的满足
               must: [
                 {
-                  // multi_match：同时在多个字段中进行全文检索。
                   multi_match: {
                     query: keyword,
-                    // 3、2 表示权重， 这里数字越大权重越高
                     fields: ['title^3', 'summary^2', 'content'],
-                    // ik_smart 告诉 ES 使用 IK 智能分词器分析搜索关键词
                     analyzer: 'ik_smart',
                   },
                 },
@@ -172,24 +208,19 @@ export class SearchIndexService implements OnModuleInit, OnModuleDestroy {
         size: pageSize,
         query,
         // 列表不回传全文，仍用 content 做匹配与高亮
-        // 搜索结果通常只需要展示、标题、摘要、标签、作者、发布时间、不需要将整篇md正文返回给前端
-        _source: { // 查询时不返回 content 字段，但不影响 ES 使用 content 参与全文检索
+        _source: {
           excludes: ['content'],
         },
         // 命中片段打 <em>，给前端做摘要；正文最多 3 段、标题整段不高亮切片
         highlight: {
           fields: {
-            // 表示不切割标题，返回整个标题的高亮结果
             title: { number_of_fragments: 0 },
-            // 每个高亮片段目标长度约为 160 个字符、最多返回 3 个片段
-            // ES 只需要返回关键词附近的部分内容，前端就能展示搜索摘要
             content: { fragment_size: 160, number_of_fragments: 3 },
             summary: { fragment_size: 120, number_of_fragments: 1 },
           },
         },
       });
 
-      // 获取命中总数
       const totalRaw = response.hits.total;
       const total =
         typeof totalRaw === 'number' ? totalRaw : (totalRaw?.value ?? 0);
@@ -204,6 +235,8 @@ export class SearchIndexService implements OnModuleInit, OnModuleDestroy {
           categoryId: src.categoryId ?? null,
           tags: src.tags ?? null,
           authorId: src.authorId ?? null,
+          teamId: src.teamId ?? null,
+          isPublic: src.isPublic ?? null,
           status: src.status ?? null,
           publishTime: src.publishTime ?? null,
           score: hit._score ?? 0,
@@ -226,31 +259,15 @@ export class SearchIndexService implements OnModuleInit, OnModuleDestroy {
   /** 中文：写入细切（ik_max_word），检索粗切（ik_smart） */
   private readonly ikText = {
     type: 'text' as const,
-    // $ 尽可能细粒度地拆分词语 (写入索引时使用的分词器)
     analyzer: 'ik_max_word',
-    // $ 更偏向智能、粗粒度分词  (用户搜索时使用的分词器)
     search_analyzer: 'ik_smart',
   };
 
-  /** 索引不存在则创建；已有但未配 IK 则删掉重建（须重新发布文档） */
+  /** 索引不存在则创建（title / summary / content 用 IK） */
   private async ensureEsIndex() {
     if (!this.es) return;
     const exists = await this.es.indices.exists({ index: ES_INDEX });
-    if (exists) {
-      // $ map为 	表结构 / 字段定义
-      const mapping = await this.es.indices.getMapping({ index: ES_INDEX });
-      const title = mapping[ES_INDEX]?.mappings?.properties?.title as
-        { analyzer?: string } | undefined;
-
-      // $ 判断是否配置了 IK 分词器
-      if (title?.analyzer === 'ik_max_word') {
-        return;
-      }
-      this.logger.warn(
-        `索引 ${ES_INDEX} 未使用 IK，将删除并重建（请重新发布文档）`,
-      );
-      await this.es.indices.delete({ index: ES_INDEX });
-    }
+    if (exists) return;
 
     await this.es.indices.create({
       index: ES_INDEX,
@@ -264,10 +281,30 @@ export class SearchIndexService implements OnModuleInit, OnModuleDestroy {
           status: { type: 'integer' },
           categoryId: { type: 'keyword' },
           authorId: { type: 'keyword' },
+          teamId: { type: 'keyword' },
+          isPublic: { type: 'boolean' },
           publishTime: { type: 'date' },
         },
       },
     });
-    this.logger.log(`已创建 ES 索引：${ES_INDEX}（ik_max_word / ik_smart）`);
+    this.logger.log(`已创建 ES 索引：${ES_INDEX}`);
+  }
+
+  /** 已有索引补可见性字段（旧 mapping 没有 isPublic） */
+  private async ensureVisibilityMapping() {
+    if (!this.es) return;
+    try {
+      await this.es.indices.putMapping({
+        index: ES_INDEX,
+        properties: {
+          isPublic: { type: 'boolean' },
+          teamId: { type: 'keyword' },
+          authorId: { type: 'keyword' },
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`kh_document 可见性 mapping 更新失败：${message}`);
+    }
   }
 }
